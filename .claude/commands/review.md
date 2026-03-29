@@ -1,0 +1,6 @@
+<!--
+SPDX-FileCopyrightText: 2025 Tom Haynes <loghyr@gmail.com>
+SPDX-License-Identifier: AGPL-3.0-or-later
+-->
+
+Run the @agents/review.md agent on the current changes.

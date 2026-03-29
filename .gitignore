@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Generated test output
+tests/test_output/
+test_output/
+__pycache__/
+*.pyc
+
+# Python packaging
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Reference RFCs (available online)
+rfc*.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

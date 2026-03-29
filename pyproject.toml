@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reply-xdr"
+version = "0.1.0"
+description = "XDR parser, code generator, and ONC RPC library for Python"
+readme = "README.md"
+license = "AGPL-3.0-or-later"
+requires-python = ">=3.6"
+authors = [
+    {name = "Tom Haynes", email = "loghyr@gmail.com"},
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: System :: Networking",
+]
+dependencies = [
+    "xdrlib3",
+]
+
+[project.optional-dependencies]
+gss = ["gssapi"]
+
+[project.scripts]
+xdr-parser = "xdr_parser:main"
+
+[project.urls]
+Homepage = "https://github.com/loghyr/reply"
+
+[tool.setuptools.packages.find]
+include = ["rpc*"]
