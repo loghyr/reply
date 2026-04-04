@@ -1,6 +1,6 @@
 <!--
 SPDX-FileCopyrightText: 2025 Tom Haynes <loghyr@gmail.com>
-SPDX-License-Identifier: AGPL-3.0-or-later
+SPDX-License-Identifier: Apache-2.0
 -->
 
 # reply — Claude Code Project Instructions
@@ -40,9 +40,8 @@ by `xdr_parser.py` from `rpc.x` and `gss.x`. Regenerate with:
 
 ## License rules
 
-- All original code: AGPL-3.0-or-later
+- All original code: Apache-2.0
 - RFC-derived `.x` files: BSD-3-Clause (preserved from source)
-- **No GPL-2.0-only code** — incompatible with AGPL-3.0
 - SPDX headers required on all files
 - Never add `Co-Authored-By:` lines in the reffs project — but they
   ARE used in this repo

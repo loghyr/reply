@@ -1,4 +1,4 @@
-<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
 # reply — XDR/RPC toolkit for Python
 
 A Python XDR parser, code generator, and ONC RPC client/server library.
@@ -70,7 +70,7 @@ make test-c        # Generate C from all tests
 
 ## License
 
-AGPL-3.0-or-later. See [LICENSE](LICENSE) for the full text.
+Apache-2.0. See [LICENSE](LICENSE) for the full text.
 
 The `.x` files derived from IETF RFCs retain their original BSD-3-Clause
 license as noted in their headers.

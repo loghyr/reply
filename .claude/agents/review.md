@@ -1,6 +1,6 @@
 <!--
 SPDX-FileCopyrightText: 2025 Tom Haynes <loghyr@gmail.com>
-SPDX-License-Identifier: AGPL-3.0-or-later
+SPDX-License-Identifier: Apache-2.0
 -->
 
 ---
@@ -31,10 +31,10 @@ done
 
 ### License compatibility
 
-reply is AGPL-3.0-or-later. Check:
-- **Compatible**: AGPL-3.0, GPL-3.0-or-later, MIT, BSD-2-Clause,
-  BSD-3-Clause, ISC, Apache-2.0
-- **NOT compatible**: GPL-2.0-only, any proprietary license
+reply is Apache-2.0. Check:
+- **Compatible**: MIT, BSD-2-Clause, BSD-3-Clause, ISC, Apache-2.0
+- **NOT compatible**: any proprietary or copyleft license that
+  would restrict downstream Apache-2.0 users
 
 Flag any new import or dependency with GPL-2.0-only or unknown license.
 

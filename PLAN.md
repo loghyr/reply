@@ -1,4 +1,4 @@
-<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- SPDX-License-Identifier: Apache-2.0 -->
 # Plan: reply — XDR/RPC toolkit for Python
 
 ## What this is
@@ -8,12 +8,12 @@ A standalone Python package providing:
 - `rpc/` — ONC RPC client/server library (RFC 1831, RFC 2203)
 
 Designed as a drop-in replacement for pynfs, with no GPL dependencies.
-Licensed AGPL-3.0-or-later.
+Licensed Apache-2.0.
 
 ## Repo packaging TODO
 
 ### Files to create
-- `LICENSE` — AGPL-3.0-or-later full text
+- `LICENSE` — Apache-2.0 full text
 - `README.md` — project overview, install, usage
 - `pyproject.toml` — Python packaging (PEP 621)
 - `CLAUDE.md` — Claude Code project instructions

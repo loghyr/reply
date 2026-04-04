@@ -1,6 +1,6 @@
 <!--
 SPDX-FileCopyrightText: 2025 Tom Haynes <loghyr@gmail.com>
-SPDX-License-Identifier: AGPL-3.0-or-later
+SPDX-License-Identifier: Apache-2.0
 -->
 
 # Python Coding Standards
@@ -19,7 +19,7 @@ Every source file must begin with:
 
 ```python
 # SPDX-FileCopyrightText: YEAR Tom Haynes <loghyr@gmail.com>
-# SPDX-License-Identifier: AGPL-3.0-or-later
+# SPDX-License-Identifier: Apache-2.0
 ```
 
 For `.x` files use `/* */` comment style. For `.md` files use `<!-- -->`.
