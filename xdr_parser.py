@@ -1723,6 +1723,32 @@ C_XDR_FUNC_MAP = {
 }
 
 
+def _eval_const(value: str, known: dict) -> int:
+    """Evaluate a constant expression to an integer.
+
+    Handles decimal, hex, octal, and simple A+B / A-B arithmetic.
+    Raises ValueError if not evaluable.
+    """
+    value = value.strip()
+    if value.startswith('0x') or value.startswith('0X'):
+        return int(value, 16)
+    if value.startswith('0') and len(value) > 1 and value[1:].isdigit():
+        return int(value, 8)
+    try:
+        return int(value)
+    except ValueError:
+        pass
+    if value in known:
+        return known[value]
+    for op in ('+', '-'):
+        if op in value:
+            parts = value.split(op, 1)
+            left = _eval_const(parts[0].strip(), known)
+            right = _eval_const(parts[1].strip(), known)
+            return (left + right) if op == '+' else (left - right)
+    raise ValueError("Cannot evaluate: %s" % value)
+
+
 class CCodeGenerator:
     def __init__(self, spec: Specification, prefix: str):
         self.spec = spec
@@ -1784,13 +1810,8 @@ class CCodeGenerator:
         elif isinstance(ts, UnsignedType):
             return C_TYPE_MAP.get(ts.name, 'uint32_t')
         elif isinstance(ts, IdentifierType):
-            resolved = self.name_dict.get(ts.name)
-            if isinstance(resolved, EnumDef):
-                return 'enum %s' % ts.name
-            elif isinstance(resolved, StructDef):
-                return 'struct %s' % ts.name
-            elif isinstance(resolved, UnionDef):
-                return 'struct %s' % ts.name
+            # typedef struct/enum/union foo foo; is emitted for every named type,
+            # so use the bare name everywhere.
             return ts.name
         return 'void'
 
@@ -1812,7 +1833,9 @@ class CCodeGenerator:
             for i, ec in enumerate(defn.body):
                 comma = ',' if i < len(defn.body) - 1 else ''
                 h += "\t%s = %s%s\n" % (ec.name, ec.value, comma)
-            h += "};\n\n"
+            h += "};\n"
+            # rpcgen emits typedef so callers use the bare name, not 'enum foo'.
+            h += "typedef enum %s %s;\n\n" % (defn.name, defn.name)
             return h, ''
 
         elif isinstance(defn, StructDef):
@@ -1820,15 +1843,18 @@ class CCodeGenerator:
             for d in defn.body:
                 h += self._c_struct_member(d)
             h += "};\n"
-            h += "extern bool_t xdr_%s(XDR *, struct %s *);\n\n" % (defn.name, defn.name)
+            h += "typedef struct %s %s;\n" % (defn.name, defn.name)
+            h += "extern bool_t xdr_%s(XDR *, %s *);\n\n" % (defn.name, defn.name)
 
-            c = "bool_t\nxdr_%s(XDR *xdrs, struct %s *objp)\n{\n" % (defn.name, defn.name)
+            c = "bool_t\nxdr_%s(XDR *xdrs, %s *objp)\n{\n" % (defn.name, defn.name)
             for d in defn.body:
                 c += self._c_xdr_member(d, 'objp')
             c += "\treturn TRUE;\n}\n\n"
             return h, c
 
         elif isinstance(defn, UnionDef):
+            # rpcgen names the union sub-field '{typename}_u', not bare 'u'.
+            union_u = '%s_u' % defn.name
             h = "struct %s {\n" % defn.name
             discrim_type = self._c_decl_type(defn.discriminant)
             discrim_name = _raw_decl_name(defn.discriminant)
@@ -1839,11 +1865,12 @@ class CCodeGenerator:
                     h += "\t" + self._c_struct_member(cs.declaration)
             if defn.default_arm and not isinstance(defn.default_arm, VoidDecl):
                 h += "\t" + self._c_struct_member(defn.default_arm)
-            h += "\t} u;\n"
+            h += "\t} %s;\n" % union_u
             h += "};\n"
-            h += "extern bool_t xdr_%s(XDR *, struct %s *);\n\n" % (defn.name, defn.name)
+            h += "typedef struct %s %s;\n" % (defn.name, defn.name)
+            h += "extern bool_t xdr_%s(XDR *, %s *);\n\n" % (defn.name, defn.name)
 
-            c = "bool_t\nxdr_%s(XDR *xdrs, struct %s *objp)\n{\n" % (defn.name, defn.name)
+            c = "bool_t\nxdr_%s(XDR *xdrs, %s *objp)\n{\n" % (defn.name, defn.name)
             c += self._c_xdr_member(defn.discriminant, 'objp')
             c += "\tswitch (objp->%s) {\n" % discrim_name
             for cs in defn.cases:
@@ -1852,14 +1879,17 @@ class CCodeGenerator:
                 if isinstance(cs.declaration, VoidDecl):
                     c += "\t\tbreak;\n"
                 else:
-                    c += self._c_xdr_member(cs.declaration, '&objp->u')
+                    # Union arm: 'objp->{union_u}' is a value, use '.' for members.
+                    c += self._c_xdr_member(cs.declaration,
+                                            'objp->%s' % union_u, sep='.')
                     c += "\t\tbreak;\n"
             if defn.default_arm is not None:
                 c += "\tdefault:\n"
                 if isinstance(defn.default_arm, VoidDecl):
                     c += "\t\tbreak;\n"
                 else:
-                    c += self._c_xdr_member(defn.default_arm, '&objp->u')
+                    c += self._c_xdr_member(defn.default_arm,
+                                            'objp->%s' % union_u, sep='.')
                     c += "\t\tbreak;\n"
             c += "\t}\n"
             c += "\treturn TRUE;\n}\n\n"
@@ -1870,24 +1900,84 @@ class CCodeGenerator:
             name = _raw_decl_name(decl)
             if not name:
                 return '', ''
+
             if isinstance(decl, SimpleDecl):
                 c_type = self._c_type(decl.type_spec)
-                return "typedef %s %s;\n" % (c_type, name), ''
+                type_name = _type_name(decl.type_spec)
+                xdr_func = C_XDR_FUNC_MAP.get(type_name, 'xdr_%s' % type_name)
+                h = "typedef %s %s;\n" % (c_type, name)
+                h += "extern bool_t xdr_%s(XDR *, %s *);\n\n" % (name, name)
+                c = "bool_t\nxdr_%s(XDR *xdrs, %s *objp)\n{\n" % (name, name)
+                c += "\tif (!%s(xdrs, objp))\n\t\treturn FALSE;\n" % xdr_func
+                c += "\treturn TRUE;\n}\n\n"
+                return h, c
+
             elif isinstance(decl, PointerDecl):
                 c_type = self._c_type(decl.type_spec)
-                return "typedef %s *%s;\n" % (c_type, name), ''
+                type_name = _type_name(decl.type_spec)
+                h = "typedef %s *%s;\n" % (c_type, name)
+                h += "extern bool_t xdr_%s(XDR *, %s *);\n\n" % (name, name)
+                c = "bool_t\nxdr_%s(XDR *xdrs, %s *objp)\n{\n" % (name, name)
+                c += "\tif (!xdr_pointer(xdrs, (char **)objp, sizeof(%s), (xdrproc_t)xdr_%s))\n\t\treturn FALSE;\n" % (c_type, type_name)
+                c += "\treturn TRUE;\n}\n\n"
+                return h, c
+
             elif isinstance(decl, StringDecl):
-                return "typedef char *%s;\n" % name, ''
+                max_s = decl.max_size or '~0'
+                h = "typedef char *%s;\n" % name
+                h += "extern bool_t xdr_%s(XDR *, %s *);\n\n" % (name, name)
+                c = "bool_t\nxdr_%s(XDR *xdrs, %s *objp)\n{\n" % (name, name)
+                c += "\tif (!xdr_string(xdrs, objp, %s))\n\t\treturn FALSE;\n" % max_s
+                c += "\treturn TRUE;\n}\n\n"
+                return h, c
+
             elif isinstance(decl, OpaqueVarDecl):
-                return "typedef struct { uint32_t len; char *val; } %s;\n" % name, ''
+                # rpcgen: struct { u_int foo_len; char *foo_val; } foo;
+                max_s = decl.max_size or '~0'
+                h = "typedef struct {\n\tu_int %s_len;\n\tchar *%s_val;\n} %s;\n" % (
+                    name, name, name)
+                h += "extern bool_t xdr_%s(XDR *, %s *);\n\n" % (name, name)
+                c = "bool_t\nxdr_%s(XDR *xdrs, %s *objp)\n{\n" % (name, name)
+                c += "\tif (!xdr_bytes(xdrs, &objp->%s_val, &objp->%s_len, %s))\n\t\treturn FALSE;\n" % (
+                    name, name, max_s)
+                c += "\treturn TRUE;\n}\n\n"
+                return h, c
+
             elif isinstance(decl, OpaqueFixedDecl):
-                return "typedef char %s[%s];\n" % (name, decl.size), ''
+                # rpcgen: typedef char foo[N]; xdr_foo takes the array by value decay.
+                h = "typedef char %s[%s];\n" % (name, decl.size)
+                h += "extern bool_t xdr_%s(XDR *, %s);\n\n" % (name, name)
+                c = "bool_t\nxdr_%s(XDR *xdrs, %s objp)\n{\n" % (name, name)
+                c += "\tif (!xdr_opaque(xdrs, objp, %s))\n\t\treturn FALSE;\n" % decl.size
+                c += "\treturn TRUE;\n}\n\n"
+                return h, c
+
             elif isinstance(decl, FixedArrayDecl):
                 c_type = self._c_type(decl.type_spec)
-                return "typedef %s %s[%s];\n" % (c_type, name, decl.size), ''
+                type_name = _type_name(decl.type_spec)
+                xdr_func = C_XDR_FUNC_MAP.get(type_name, 'xdr_%s' % type_name)
+                h = "typedef %s %s[%s];\n" % (c_type, name, decl.size)
+                h += "extern bool_t xdr_%s(XDR *, %s);\n\n" % (name, name)
+                c = "bool_t\nxdr_%s(XDR *xdrs, %s objp)\n{\n" % (name, name)
+                c += "\tif (!xdr_vector(xdrs, (char *)objp, %s, sizeof(%s), (xdrproc_t)%s))\n\t\treturn FALSE;\n" % (
+                    decl.size, c_type, xdr_func)
+                c += "\treturn TRUE;\n}\n\n"
+                return h, c
+
             elif isinstance(decl, VarArrayDecl):
+                # rpcgen: struct { u_int foo_len; T *foo_val; } foo;
                 c_type = self._c_type(decl.type_spec)
-                return "typedef struct { uint32_t len; %s *val; } %s;\n" % (c_type, name), ''
+                type_name = _type_name(decl.type_spec)
+                xdr_func = C_XDR_FUNC_MAP.get(type_name, 'xdr_%s' % type_name)
+                max_s = decl.max_size or '~0'
+                h = "typedef struct {\n\tu_int %s_len;\n\t%s *%s_val;\n} %s;\n" % (
+                    name, c_type, name, name)
+                h += "extern bool_t xdr_%s(XDR *, %s *);\n\n" % (name, name)
+                c = "bool_t\nxdr_%s(XDR *xdrs, %s *objp)\n{\n" % (name, name)
+                c += "\tif (!xdr_array(xdrs, (char **)&objp->%s_val, &objp->%s_len, %s, sizeof(%s), (xdrproc_t)%s))\n\t\treturn FALSE;\n" % (
+                    name, name, max_s, c_type, xdr_func)
+                c += "\treturn TRUE;\n}\n\n"
+                return h, c
 
         elif isinstance(defn, ProgramDef):
             h = "#define %s %s\n" % (defn.name, defn.program_number)
@@ -1914,12 +2004,14 @@ class CCodeGenerator:
             c_type = self._c_type(decl.type_spec)
             return "\t%s %s[%s];\n" % (c_type, name, decl.size)
         elif isinstance(decl, VarArrayDecl):
+            # rpcgen: struct { u_int name_len; T *name_val; } name;
             c_type = self._c_type(decl.type_spec)
-            return "\tstruct { uint32_t len; %s *val; } %s;\n" % (c_type, name)
+            return "\tstruct { u_int %s_len; %s *%s_val; } %s;\n" % (name, c_type, name, name)
         elif isinstance(decl, OpaqueFixedDecl):
             return "\tchar %s[%s];\n" % (name, decl.size)
         elif isinstance(decl, OpaqueVarDecl):
-            return "\tstruct { uint32_t len; char *val; } %s;\n" % name
+            # rpcgen: struct { u_int name_len; char *name_val; } name;
+            return "\tstruct { u_int %s_len; char *%s_val; } %s;\n" % (name, name, name)
         elif isinstance(decl, StringDecl):
             return "\tchar *%s;\n" % name
         elif isinstance(decl, PointerDecl):
@@ -1927,27 +2019,35 @@ class CCodeGenerator:
             return "\t%s *%s;\n" % (c_type, name)
         return ''
 
-    def _c_xdr_member(self, decl: Declaration, obj: str) -> str:
+    def _c_xdr_member(self, decl: Declaration, obj: str, sep: str = '->') -> str:
+        """Generate an XDR encode/decode call for one struct or union member.
+
+        obj  -- C expression for the containing object.  A pointer when
+                sep='->'; a union-member value (accessed via prior '->')
+                when sep='.'.
+        sep  -- '->': obj is a pointer (normal struct / discriminant path).
+                '.': obj is a union value (union-arm path: objp->{name}_u).
+        """
         if isinstance(decl, VoidDecl):
             return ''
         name = _raw_decl_name(decl)
-        accessor = '%s->%s' % (obj, name)
+        accessor = '%s%s%s' % (obj, sep, name)
 
         if isinstance(decl, SimpleDecl):
             type_name = _type_name(decl.type_spec)
             xdr_func = C_XDR_FUNC_MAP.get(type_name)
             if xdr_func:
                 return "\tif (!%s(xdrs, &%s))\n\t\treturn FALSE;\n" % (xdr_func, accessor)
-            # For user-defined types
             return "\tif (!xdr_%s(xdrs, &%s))\n\t\treturn FALSE;\n" % (type_name, accessor)
 
         elif isinstance(decl, OpaqueFixedDecl):
             return "\tif (!xdr_opaque(xdrs, %s, %s))\n\t\treturn FALSE;\n" % (accessor, decl.size)
 
         elif isinstance(decl, OpaqueVarDecl):
+            # accessor is e.g. 'objp->data'; sub-fields are 'objp->data.data_val'.
             max_s = decl.max_size or '~0'
-            return "\tif (!xdr_bytes(xdrs, &%s.val, &%s.len, %s))\n\t\treturn FALSE;\n" % (
-                accessor, accessor, max_s)
+            return "\tif (!xdr_bytes(xdrs, &%s.%s_val, &%s.%s_len, %s))\n\t\treturn FALSE;\n" % (
+                accessor, name, accessor, name, max_s)
 
         elif isinstance(decl, StringDecl):
             max_s = decl.max_size or '~0'
@@ -1961,12 +2061,13 @@ class CCodeGenerator:
                 accessor, decl.size, c_type, xdr_func)
 
         elif isinstance(decl, VarArrayDecl):
+            # accessor is e.g. 'objp->arr'; sub-fields are 'objp->arr.arr_val'.
             type_name = _type_name(decl.type_spec)
             xdr_func = C_XDR_FUNC_MAP.get(type_name, 'xdr_%s' % type_name)
             c_type = self._c_type(decl.type_spec)
             max_s = decl.max_size or '~0'
-            return "\tif (!xdr_array(xdrs, (char **)&%s.val, &%s.len, %s, sizeof(%s), (xdrproc_t)%s))\n\t\treturn FALSE;\n" % (
-                accessor, accessor, max_s, c_type, xdr_func)
+            return "\tif (!xdr_array(xdrs, (char **)&%s.%s_val, &%s.%s_len, %s, sizeof(%s), (xdrproc_t)%s))\n\t\treturn FALSE;\n" % (
+                accessor, name, accessor, name, max_s, c_type, xdr_func)
 
         elif isinstance(decl, PointerDecl):
             type_name = _type_name(decl.type_spec)
@@ -1974,6 +2075,210 @@ class CCodeGenerator:
                 accessor, self._c_type(decl.type_spec), type_name)
 
         return ''
+
+
+##########################################################################
+#                        Names Code Generator                            #
+##########################################################################
+
+class NamesGenerator:
+    """Generate integer-to-name lookup tables from XDR enum/const definitions.
+
+    For each group of constants sharing a common prefix (e.g., NFS4ERR_,
+    FATTR4_, OP_, CB_), emits a lookup function that maps integer values to
+    their string names.  Emits _MAX constants (e.g., OP_MAX) for tracked
+    groups that request them.
+
+    For C (--lang c --names): emits {prefix}_names.h and {prefix}_names.c.
+    For Python (--lang python --names): emits {prefix}_names.py.
+    """
+
+    # (prefix, C_func_name, max_const_or_None, exclusive, exclude_from_max_or_None)
+    # Listed longest-match first so OP_ does not shadow OP_CB_ etc.
+    #
+    # exclusive: True  -> _MAX = highest_val + 1  (array size, e.g. OP_MAX)
+    #            False -> _MAX = highest_val       (inclusive, e.g. FATTR4_ATTRIBUTE_MAX)
+    #
+    # exclude_from_max: names excluded from the _MAX calculation
+    # (but still included in the lookup table).
+    TRACKED = [
+        ('NFS4ERR_',  'nfs4_err_name',    None,                   True,  None),
+        # FATTR4_ATTRIBUTE_MAX is an inclusive max (highest valid attr bit).
+        ('FATTR4_',   'fattr4_name',       'FATTR4_ATTRIBUTE_MAX', False, None),
+        ('OP_CB_',    'nfs4_cb_name',      None,                   True,  None),
+        # OP_ILLEGAL = 10044 is in the enum but the dispatch table only
+        # covers real protocol ops; exclude it from the OP_MAX bound.
+        ('OP_',       'nfs4_op_name',      'OP_MAX',               True,
+         frozenset({'OP_ILLEGAL', 'OP_CB_ILLEGAL'})),
+    ]
+
+    def __init__(self, spec: Specification, prefix: str):
+        self.spec = spec
+        self.prefix = prefix
+
+        # Collect all named integer constants from enums and const defs.
+        self.constants = {}  # name -> int
+        for defn in spec.definitions:
+            if isinstance(defn, ConstDef):
+                try:
+                    self.constants[defn.name] = _eval_const(defn.value, self.constants)
+                except (ValueError, KeyError):
+                    pass
+            elif isinstance(defn, EnumDef):
+                for ec in defn.body:
+                    try:
+                        self.constants[ec.name] = _eval_const(ec.value, self.constants)
+                    except (ValueError, KeyError):
+                        pass
+
+    def _build_groups(self):
+        """Return {prefix: sorted[(name, val)]} for tracked prefixes."""
+        groups = {}
+        prefixes = [entry[0] for entry in self.TRACKED]
+        for name, val in self.constants.items():
+            for pfx in prefixes:
+                if name.startswith(pfx):
+                    groups.setdefault(pfx, []).append((name, val))
+                    break
+        for pfx in groups:
+            groups[pfx].sort(key=lambda x: x[1])
+        return groups
+
+    def _max_val_for_group(self, pfx: str, entries: list) -> int:
+        """Return the highest value in entries, honouring exclude_from_max."""
+        exclude = None
+        for entry in self.TRACKED:
+            if entry[0] == pfx:
+                exclude = entry[4]
+                break
+        if exclude:
+            filtered = [v for name, v in entries if name not in exclude]
+        else:
+            filtered = [v for _, v in entries]
+        return max(filtered) if filtered else 0
+
+    def _max_const_val(self, pfx: str, entries: list) -> int:
+        """Return the value to emit for the _MAX constant.
+
+        exclusive=True:  max_val + 1  (array size)
+        exclusive=False: max_val      (inclusive maximum)
+        """
+        max_val = self._max_val_for_group(pfx, entries)
+        exclusive = True
+        for entry in self.TRACKED:
+            if entry[0] == pfx:
+                exclusive = entry[3]
+                break
+        return max_val + 1 if exclusive else max_val
+
+    def generate_c(self, output_dir: str):
+        h_file = os.path.join(output_dir, self.prefix + '_names.h')
+        c_file = os.path.join(output_dir, self.prefix + '_names.c')
+
+        guard = self.prefix.upper() + '_NAMES_H'
+        groups = self._build_groups()
+
+        h_lines = []
+        c_lines = []
+
+        h_lines.append("/* DO NOT EDIT - generated by xdr_parser.py from %s.x */\n" % self.prefix)
+        h_lines.append("/* Apply changes to %s.x instead. */\n\n" % self.prefix)
+        h_lines.append("#ifndef %s\n#define %s\n\n" % (guard, guard))
+        h_lines.append("#include <stdint.h>\n\n")
+
+        c_lines.append("/* DO NOT EDIT - generated by xdr_parser.py from %s.x */\n" % self.prefix)
+        c_lines.append("/* Apply changes to %s.x instead. */\n\n" % self.prefix)
+        c_lines.append('#include "%s_names.h"\n\n' % self.prefix)
+
+        for pfx, func_name, max_const, _excl, _excl2 in self.TRACKED:
+            if pfx not in groups:
+                continue
+            entries = groups[pfx]
+            if not entries:
+                continue
+
+            min_val = entries[0][1]
+            max_val = entries[-1][1]
+
+            if max_const:
+                h_lines.append("#define %s (%d)\n" % (
+                    max_const, self._max_const_val(pfx, entries)))
+            h_lines.append("const char *%s(uint32_t val);\n\n" % func_name)
+
+            # Dense array when >= 50% fill and range fits in 4096 slots.
+            range_size = max_val - min_val + 1
+            density = len(entries) / range_size if range_size > 0 else 0
+            use_array = (density >= 0.5) and (range_size <= 4096)
+
+            if use_array:
+                table = ['NULL'] * range_size
+                for entry_name, val in entries:
+                    idx = val - min_val
+                    if 0 <= idx < range_size:
+                        table[idx] = '"%s"' % entry_name
+                c_lines.append("static const char * const %s_names[] = {\n" % func_name)
+                for i, s in enumerate(table):
+                    c_lines.append("\t%s,\n" % s)
+                c_lines.append("};\n\n")
+                c_lines.append("const char *\n%s(uint32_t val)\n{\n" % func_name)
+                if min_val > 0:
+                    c_lines.append("\tif (val < %du)\n\t\treturn NULL;\n" % min_val)
+                c_lines.append("\tif (val > %du)\n\t\treturn NULL;\n" % max_val)
+                c_lines.append("\treturn %s_names[val - %du];\n" % (func_name, min_val))
+                c_lines.append("}\n\n")
+            else:
+                # Sparse: switch statement.
+                c_lines.append("const char *\n%s(uint32_t val)\n{\n" % func_name)
+                c_lines.append("\tswitch (val) {\n")
+                seen = set()
+                for entry_name, val in entries:
+                    if val not in seen:
+                        c_lines.append("\tcase %du: return \"%s\";\n" % (val, entry_name))
+                        seen.add(val)
+                c_lines.append("\tdefault: return NULL;\n")
+                c_lines.append("\t}\n")
+                c_lines.append("}\n\n")
+
+        h_lines.append("#endif /* %s */\n" % guard)
+
+        with open(h_file, 'w') as f:
+            f.write(''.join(h_lines))
+        with open(c_file, 'w') as f:
+            f.write(''.join(c_lines))
+
+    def generate_python(self, output_dir: str):
+        py_file = os.path.join(output_dir, self.prefix + '_names.py')
+        groups = self._build_groups()
+
+        lines = []
+        lines.append("# DO NOT EDIT - generated by xdr_parser.py from %s.x\n" % self.prefix)
+        lines.append("# Apply changes to %s.x instead.\n\n" % self.prefix)
+
+        for pfx, func_name, max_const, _excl, _excl2 in self.TRACKED:
+            if pfx not in groups:
+                continue
+            entries = groups[pfx]
+            if not entries:
+                continue
+
+            if max_const:
+                lines.append("%s = %d\n" % (
+                    max_const, self._max_const_val(pfx, entries)))
+
+            # Dict name is the capitalized version of the func without trailing '_name'.
+            dict_name = func_name.upper()
+            if dict_name.endswith('_NAME'):
+                dict_name = dict_name[:-5] + 'S'
+            lines.append("%s = {\n" % dict_name)
+            seen = set()
+            for entry_name, val in entries:
+                if val not in seen:
+                    lines.append("    %d: '%s',\n" % (val, entry_name))
+                    seen.add(val)
+            lines.append("}\n\n")
+
+        with open(py_file, 'w') as f:
+            f.write(''.join(lines))
 
 
 ##########################################################################
@@ -1986,6 +2291,8 @@ def main():
     parser.add_argument('input', help='Input XDR (.x) file')
     parser.add_argument('--lang', choices=['python', 'c'], default='python',
                        help='Target language (default: python)')
+    parser.add_argument('--names', action='store_true',
+                       help='Generate name-lookup tables instead of XDR code')
     parser.add_argument('--output-dir', default='.',
                        help='Output directory (default: current directory)')
     parser.add_argument('--prefix',
@@ -2027,7 +2334,16 @@ def main():
         sys.exit(1)
 
     # Generate
-    if args.lang == 'python':
+    if args.names:
+        gen = NamesGenerator(spec, prefix)
+        if args.lang == 'c':
+            gen.generate_c(args.output_dir)
+            print("Generated %s_names.h, %s_names.c in %s" % (
+                prefix, prefix, args.output_dir))
+        else:
+            gen.generate_python(args.output_dir)
+            print("Generated %s_names.py in %s" % (prefix, args.output_dir))
+    elif args.lang == 'python':
         gen = PythonCodeGenerator(spec, prefix)
         gen.generate(args.output_dir)
         print("Generated %s_const.py, %s_type.py, %s_pack.py in %s" % (
