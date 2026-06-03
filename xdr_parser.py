@@ -2142,6 +2142,7 @@ class NamesGenerator:
     # exclude_from_max: names excluded from the _MAX calculation
     # (but still included in the lookup table).
     TRACKED = [
+        ('NFS3ERR_',  'nfs3_err_name',    None,                   True,  None),
         ('NFS4ERR_',  'nfs4_err_name',    None,                   True,  None),
         # FATTR4_ATTRIBUTE_MAX is an inclusive max (highest valid attr bit).
         ('FATTR4_',   'fattr4_name',       'FATTR4_ATTRIBUTE_MAX', False, None),
